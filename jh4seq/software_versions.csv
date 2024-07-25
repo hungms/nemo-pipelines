@@ -1,0 +1,8 @@
+name,module
+samtools,SAMtools/1.13-GCC-10.2.0
+bwa,BWA/0.7.17-foss-2018a
+conda,Anaconda3/2023.03
+bcftools,BCFtools/1.9-foss-2018b
+gatk,GATK/4.1.8.1-GCCcore-9.3.0-Java-1.8
+mafft,MAFFT/7.475-GCC-10.2.0-with-extensions
+fastx,FASTX-Toolkit/0.0.14-foss-2016b

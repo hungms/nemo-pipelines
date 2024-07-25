@@ -1,0 +1,553 @@
+---
+title: "DN19023-ax343 - version 4 (task 5)"
+author: "Robert Goldstone"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(showtext)
+font_add("Arial", "/Library/Fonts/Arial.ttf")  # Ridiculous that I need this
+showtext_auto()
+```
+
+# Project description
+
+The JH4 intron within the immunoglobulin locus is subject to somatic hypermutation and therefore varies in sequence compared with the germline / reference.
+
+This locus has been amplified as a 433 bp amplicon and sequenced with 2x250 bp PE reads
+
+The goal is to align the reads with the reference sequence, quantify the number of mutations per amplicon, plot a distribution of mutational load within each sample, then compare the distribution between samples.
+
+- The parameter we want to measure is number of mutations within each read.
+
+## Summary of Analysis version 1
+
+In analysis version 1, we took two approaches to characterise the mutations within the reads:
+
+1) Using the R package CrispRVariants
+2) Using the somatic variant caller Mutect2
+
+For the CrispRVariants approach, the package didn't seem to work particularly well for the type of data here.  The analysis presumed that the reads would entirely span the region under investigation, and referenced mutations to a guide sequence / location.  The notation of mutations was also pretty difficult to understand.
+
+For the Mutect2 approach - this gave the number of variants called per sample, but it did not give the number of variants called per read.
+
+## Summary of version 2
+
+In version 2, we took a back to basics approach to reevaluate the mutations in the data.  We stitched the reads into consensus reads, collapsed them into sets ising fastx_collapser, aligned them to the reference with mafft and then compared each position with the reference, keeping track of differences.
+
+# Version 3
+
+The following requests were made to refine the version 2 analysis:
+
+1) Remove any reads that contain insertions or deletions.  
+2) If there are many reads that are truncated or foreshortned, trim the sequences to the same length
+3) Run the pipeline again
+4) Break down pie charts for individual mice
+5) Evaluate cut-off to call true mutations (currently set as needing to be found in at least 2 reads) if one mouse was an outlier
+6) Cumulative table of mutations for each timepoint
+
+# Set up R for this work
+
+```{r, message=FALSE, warning=FALSE}
+library(readr)
+library(ggplot2)
+library(tidyverse)
+library(data.table)
+library(ggdendro)
+```
+
+# Step 1 - Combine the reads into a consensus read
+
+This is the same as in the first version of the analysis.  We'll stitch together the forward and reverse reads into a single sequence for the amplicon.  This step involves using the commandline program bbtool.  In the bbtools package, there is a function called bbmerge that overlaps reads into consensus reads.
+
+```{bash eval=FALSE}
+#!/usr/bin/bash
+
+module purge
+module load Miniconda3/4.7.10
+conda activate bbtools
+
+bbmerge.sh in=$read1.fastq.gz in2=$read2.fastq.gz out= merged_reads/$sample.fastq.gz
+```
+
+This produced a folder containing the consesnus reads for each sample
+
+`merged_reads/*.fastq`
+
+# Step 2 - Collapse read sequences into identical 'sets' and count the number of individuals in each set
+
+In this work, we're interested in how many mutations are present per read.  To simplify the input, we can collapse the read sequences into identical sets and count how many individuals are in each set.  We can use a program called fastx_collapser for that
+
+```{bash eval=FALSE}
+#!/usr/bin/bash
+
+module purge
+module load fastx_toolkit (Get the proper modue name for this)
+
+fastx_collapser -v -Q 33 -i merged_reads/input.fastq -o collapsed/collapsed_output.fasta
+```
+
+This produces a folder with the collapsed read sequences.  In the fasta header  for each sequence, we're given the rank order of the sequence (in terms of abundance) and the number of reads that share that sequence
+
+`collapsed/*.fasta`
+
+# Step 3 - Multiple sequence alignment using mafft
+
+Following this, we can use MAFFT to run a multiple sequence alignment on the fasta files for each sample.  We can use the -add argument of MAFFT to align the reads against the reference
+
+```{bash eval=FALSE}
+#!/usr/bin/bash
+
+module purge
+module load MAFFT (Get the proper modue name for this)
+
+mafft --auto --add collapsed/input.fasta reference.fasta > mafft/aligned.aln
+```
+
+Here, we've produced a set of multifasta format alignments (one for each sample):
+
+`mafft/*.aln`
+
+# Task list 3 - removing reads with indels
+
+It's actually pretty difficult to try to check if the reads are truncated or foreshortened, rather than just detecting these as deletions.  First, we'll just try to remove all the reads that have any indels at all, and see how many reads we have then
+
+```{r, message=FALSE, warning=FALSE}
+working.dir <- '/Volumes/babs/working/goldstr2/projects/caladod/anqi.xu/DN19023-ax343/task_5/'
+setwd(working.dir)
+dd <- read.csv('mutation_counts.tsv', sep="\t")
+dd <- data.table(dd)
+knitr::kable(dd[1,])
+
+dd.orig <- dd
+
+## first, let's just remove anything that has a indel at all
+
+dd <- dd[which( (dd$deletions + dd$insertions) == 0),]
+
+dim(dd)[1] / dim(dd.orig)[1] * 100
+```
+
+By removing reads with any indel, we're left with 86 % of reads - I think that's probably ok
+
+# Step 4 - Counting the mutations relative to the reference sequence
+
+Within each alignment, we have the aligned version of the reference.  We can walk over each of the collapsed read sets and compare each position to this reference - where we have a substitution we can count it, where the reference is a - and the experimental has a base we can count it as an insertion, where the reference has a base and the experimental has a - we can count it as a deletion.  We can also keep track of each substitution individually to produce the tables as in the paper.  I did this using a simple Perl script, but it could be done in R (but probably quite a lot slower).
+
+This results in a file named `mutation_counts.tsv`.  We can load that here and take a look at what it looks like (we'll just look at the first row because it's a massive table and takes a long time to show the whole thing)
+
+The entry we can see here is from the sample DCKP93B_BM_5DPOG, it is the most abundant sequence in the merged fastq file (rank = 1), this sequence was found in 343 reads in this sample, relative to the reference, it has 0 snps, 0 insertions and 0 deletions.  The total (edit) distance is 0 - the sequence is identical to the reference.  The aligned sequence is shown (sequence) alongside a map of the substitutions (conversions)
+
+## Adding columns for group assignment
+
+To explore any groups later on, we'll add some columns to our dataset that give the group assignment
+
+```{r, message=FALSE, warning=FALSE}
+my.samplename.list <- strsplit(dd$sample,'_')
+
+my.tissue <- vector(length = length(my.samplename.list))
+my.time <- vector(length = length(my.samplename.list))
+my.group <- vector(length = length(my.samplename.list))
+
+for (i in 1:length(my.samplename.list)) {
+  my.group[i] <- paste(my.samplename.list[[i]][-1], collapse="_")
+  my.tissue[i] <- my.samplename.list[[i]][2]
+  my.time[i] <- my.samplename.list[[i]][3]
+}
+
+dd$group <- my.group
+dd$tissue <- my.tissue
+dd$time <- my.time
+```
+
+# Analysis part 1 - QC
+
+First we'll just take a look at the raw data to get a feel for what we are dealing with
+
+## Plot sequence lengths
+
+First, we'll look at the distribution of sequence lengths - we're expecting the sequences we have to be ~ 433 bp long as this is the length of the JH4 intron that was amplified.  We've removed anything that's not 433 bp, so this is just to check
+
+```{r, message=FALSE, warning=FALSE}
+ggplot(dd, aes(x=sample, y=length)) + 
+  geom_point(aes(colour=time, shape=tissue)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+```
+
+All the sequences are 433 bp
+
+## Plot read counts
+
+We already know from the initial analysis that some of the samples have low read counts, but we can confirm it in the current data by plotting the sum of each 'count' per sample
+
+```{r, message=FALSE, warning=FALSE}
+ggplot(dd, aes(x=sample, y=count, fill=tissue)) + 
+  geom_bar(stat="identity") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+Similar to before, some samples do have very low numbers of reads - this is likely be be problematic for estimating mutations, as we're likely to detect fewer mutations in these just by chance 
+
+
+## Does the number of reads per sample affect the number of mutations we can detect?
+
+With Mutect2, we saw that samples that had less than 400 reads had pretty unreliable mutation counts - probably the result of PCR amplification errors from very low input samples
+
+In our data, we've tracked the number of SNPS, the number of indels and the total number of mutations (we can call that the edit distance).  Here we'll look at To do this, we'll SNPs rather than edit distance since SNPs are probably a more reliable estimate of 'true' mutations
+
+```{r, message=FALSE, warning=FALSE}
+dd.1 <- dd[, list(sum(count),mean(snps), unique(tissue), unique(time)), by=list(sample)]
+colnames(dd.1) <- c('sample', 'sum.count', 'mean.snps', 'tissue', 'time')
+ggplot(dd.1, aes(x=mean.snps, y=sum.count)) +
+  geom_point(aes(colour=time, shape=tissue)) +
+  geom_hline(aes(yintercept=400), color="blue", linetype="dashed")
+```
+
+With this set of samples, and in contrast with our previous sets, there is a less clear distinction between the samples with less than 400 reads and those with more than 400 reads.  It's definitely less obvious where to draw the line, here, but perhaps we can go for 100 reads in this case
+
+### Based on the above, I think it is reasonable to filter out samples that have fewer than 200 reads
+
+Let's take a look at what the affected samples are - here we'll be losing entire samples
+
+```{r, message=FALSE, warning=FALSE}
+too.few.reads <- dd.1$sample[which(dd.1$sum.count < 100)]
+print(too.few.reads)
+```
+
+## Starting to apply filters
+
+Reluctantly, I think it's also worthwhile ditching the samples that have less than 400 reads.  I don't think that, on balance, we can have much faith in the data from these
+
+```{r, message=FALSE, warning=FALSE}
+dd.filtered <- dd[!c(dd$sample %in% too.few.reads),] ## remove samples with less than 100 reads
+```
+
+
+## Look at how the number of reads for each set interacts with the number of called mutations:
+
+We might expect 'true' mutations to be called in multiple reads in a sample.  If a set is represented by only 1 read, we might suspect that this would be sequencing error or some other source of noise (of course, they could also be super low frequency mutations, but in that way inseperable from the noise)
+
+We can take a look at if the number of reads per set interacts at all with the number of called mutations in that set.  As we are interested in the lower counts, we'll set the x axis limits of the plot so we can zoom into this area
+
+```{r, message=FALSE, warning=FALSE}
+ggplot(dd.filtered, aes(x=count, y=total)) +
+  geom_point(aes(colour=time, shape=tissue)) +
+  xlim(c(0,20))
+```
+
+We can see here that, yes, sets that are represented by only 1 read have a wide range of edit distances, including upwards of 20 mutations which is rarely seen at higher coverage
+
+It's probably necessary to settle on some sort of filter here.  Very liberally, we can take a depth of at least 2x to say it's a true set
+
+```{r, message=FALSE, warning=FALSE}
+dd.filtered <- dd.filtered[which(dd.filtered$count > 1),]
+```
+
+## After all that filtering...
+
+After we've filtered our sequences down to what we hope are robust sets and samples - what has that done to our dataset?
+
+```{r, message=FALSE, warning=FALSE}
+
+# we can look at the number of rows in the table to see how many sets we're left with:
+
+dim(dd.filtered)[1]
+
+# Or look at that as a percent of the total number of set we started with:
+
+dim(dd.filtered)[1] / dim(dd.orig)[1]*100 
+
+
+```
+
+It's perhaps not fantastic news - we've lost around 90 % of our original sets - we're left with 4977 sets, which is slightly less than usig the previous filters (5269 sets), explained because here we've not got an indels
+
+## How many sets are in each sample?
+
+For interests sake, we can look at how many sets each sample now contains after filtering:
+
+```{r, message=FALSE, warning=FALSE}
+dd.filtered.1 <- dd.filtered[, list(length(count), unique(tissue), unique(time)), by=list(sample)]
+colnames(dd.filtered.1) <- c('sample', 'num.sets', 'tissue', 'time')
+ggplot(dd.filtered.1, aes(x=sample, y=num.sets, fill=tissue)) + 
+  geom_bar(stat="identity") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+dd.filtered.1 <- dd.filtered[, list(length(count), sum(count), unique(tissue), unique(time)), by=list(sample)]
+colnames(dd.filtered.1) <- c('sample', 'num.sets', 'num.reads', 'tissue', 'time')
+ggplot(dd.filtered.1, aes(x=num.sets, y=num.reads)) +
+  geom_point(aes(colour=time, shape=tissue)) 
+```
+
+The detections of heterogeneity in each sample is heavily dependent on the number of reads available
+
+# Analysis 
+
+First here we want to check how similar the different samples are to see if the independent runs give similar results.  There might be a few ways to do this, but in the first instance we'll try to use heirarchical clustering.  Here, what we'll do is turn our list of counts for each sequence set in each sample into a matrix that we can then calculate Euclidian distances on.  This gives us a measure of how similar two samples.  
+
+I don't think we can use the raw counts to do that, though, as the different depth of sequencing between the replicates would give different counts for a set even if they occupy the same proportion of the total number.  So, we can try to normalise by dividing each count by the sum of all counts for that sample
+
+```{r, message=FALSE, warning=FALSE}
+
+dd.subset <- data.frame(x = dd.filtered$sample, y = dd.filtered$sequence, z = dd.filtered$count) # take only the sample name, the sequence and the count from our filtered data
+
+# the sequence is long, we can just replace it with a hash for ease of use, where the sequence is the same, the hash will be the same.  We're removing and gaps here to avoid issues where gaps would cause the hash between otherwise identical sequences to be different
+
+for (i in 1:length(dd.subset$y)) {
+  dd.subset$y[i] <- rlang::hash(gsub('-', '', dd.subset$y[i]))
+}
+
+# now  we can reshape our data from the long format it is in now to wide format (a matrix)
+
+x <- reshape(dd.subset, idvar = "x", timevar = "y", direction = "wide")
+
+rownames(x) <- x$x # make the rownames of our matrix the sample names
+
+x <- x[,-1] # removes the first column which was just the sample names
+
+x <- t(x) # transpose the matrix to make it look like gene count matricies (samples along the top, genes along the side)
+
+x[is.na(x)] <- 0 # replace the NAs with 0s
+
+rx <- scale(x, center = FALSE, scale = colSums(x)) # calculate the counts as a ratio of the total
+
+dx <- dist(t(x)) # convert the counts to distances between samples
+h <- hclust(dx) # perform heirarchical clustering
+
+coldata <- read.csv('samplesheet_replicates.csv') # load in some information for the samples that have replicates
+
+coldata <- coldata[na.omit(match(colnames(x), coldata$sample)),] # remove any from the sample list that we filtered out from our data
+
+dendr <- dendro_data(h, type="rectangle") # convert for ggplot
+
+dendr[["labels"]] <- merge(dendr[["labels"]],coldata, by.x="label", by.y="sample") # add the sample information so we can use it when plotting
+
+```
+
+Then we can plot the tree
+
+```{r, message=FALSE, warning=FALSE, eval = F}
+
+ggplot() + 
+geom_segment(data=segment(dendr), aes(x=x, y=y, xend=xend, yend=yend)) + 
+  geom_text(data=label(dendr), aes(x, y, label=label, hjust=0, color=group), size=3, angle = 90, vjust = 0.5, hjust=1) + 
+  expand_limits(y=-900) +
+  theme(legend.position = "none")
+```
+
+```{r figSvg1,eval=TRUE,echo=FALSE,message=FALSE, error=FALSE, warning=FALSE,fig.height=5, fig.width=10}
+fig_svg<-cowplot::ggdraw()+cowplot::draw_image("Rplot01.pdf")
+plot(fig_svg)
+```
+
+So it's a bit of a mixed picture - sometimes we see replicates clustering quite closely together, but in other cases the replicates are quite distant.  I don't think that is much of a surprise - given what we've seen with the relationship between sequencing depth and the number of detected sets, it stands to reason that differences in sequencing depth between replicates would create a sampling effect where rarer mutations are missed in low-depth replicates compared with high-depth replicates, that would drive up the distances between the samples
+
+We can write this matrix to a file in case you want to look at it more closely
+
+```{r, message=FALSE, warning=FALSE}
+
+write.csv(x, 'r_output_files/sequence_set_matrix.csv')
+
+```
+
+## Continuing with the previous pipeline analysis
+
+We'll look at SNPs 
+
+```{r, message=FALSE, warning=FALSE}
+dd.filtered.groups <- dd.filtered[,list(mean(snps), unique(tissue), unique(time)), by=list(group)]
+colnames(dd.filtered.groups) <- c('group', 'mean.snps', 'tissue', 'time')
+
+dd.filtered.groups$group <- factor(dd.filtered.groups$group, levels = c("SP_5DPOG", "SP_2MPOG", "SP_4MPOG", "SP_5MPOG", "SP_9MPOG","SP_NEGCTRL", "SP_NEGCTRL2", "SP_NEGCTRL_V2", "SP_NEGCTRL_R2", "SP_POSCTRL", "SP_POSCTRL2", "SP_POSCTRL_V2", "SP_POSCTRL_R2", "BM_5DPOG", "BM_5DPOG_V2", "BM_5DPOG_R2", "BM_2MPOG", "BM_2MPOG_V2", "BM_2MPOG_2", "BM_2MPOG_R2", "BM_4MPOG", "BM_4MPOG_V2", "BM_4MPOG_R2", "BM_5MPOG", "BM_5MPOG_V2", "BM_5MPOG_R2",  "BM_9MPOG", "BM_9MPOG_V2", "BM_9MPOG_R2"))
+
+ggplot(dd.filtered.groups, aes(x=group, y=mean.snps, fill=tissue)) + 
+  geom_bar(stat="identity") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+To compare the different sequencing runs, we'll make a barchat for the SNPs in all the individual samples
+
+```{r, message=FALSE, warning=FALSE}
+
+dd.each.sample <- dd.filtered[,list(mean(snps), unique(tissue), unique(time)), by=list(sample)]
+
+colnames(dd.each.sample) <- c('sample', 'mean.snps', 'tissue', 'time')
+
+ggplot(dd.each.sample, aes(x=sample, y=mean.snps, fill=tissue)) + 
+  geom_bar(stat="identity") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 5))
+```
+
+# Pie charts
+
+The paper at `https://www.jimmunol.org/content/jimmunol/early/2019/08/09/jimmunol.1900483.full.pdf` had some pie charts showing samples and the proportion of reads with 1, 2, 3, 4, 5, 6 and 7+ mutations.  Pie charts are pretty poor ways to represent data (it's quite difficult to estimate area accurately in a pie chart, it's probably better shown in a proportional stacked bar graph)
+
+First we'll initialise a data.frame to store results, and then we'll count how many SNPS in each of the groups in our categories
+
+```{r, message=FALSE, warning=FALSE}
+
+## note, this calculates the proportion of the population of variants that have n SNPs, it ignores the counts for each variant.  It assumes the sequence represents a cell clone, and asks what is the relative proportion of this clones with n SNPs in the wider set of clones
+
+my.results <- data.frame('group' = unique(dd.filtered$group), 'zero' = 0, 'one' = 0, 'two' = 0, 'three' = 0, 'four' = 0, 'five' = 0, 'six' = 0, 'seven.plus' = 0)
+
+for (i in 1:length(my.results$group)) {
+  my.group <- dd.filtered[which(dd.filtered$group == my.results$group[i]),]
+  my.results$zero[i] = sum(my.group$count[which(my.group$snps == 0)])
+  my.results$one[i] = sum(my.group$count[which(my.group$snps == 1)])
+  my.results$two[i] = sum(my.group$count[which(my.group$snps == 2)])
+  my.results$three[i] = sum(my.group$count[which(my.group$snps == 3)])
+  my.results$four[i] = sum(my.group$count[which(my.group$snps == 4)])
+  my.results$five[i] = sum(my.group$count[which(my.group$snps == 5)])
+  my.results$six[i] = sum(my.group$count[which(my.group$snps == 6)])
+  my.results$seven.plus[i] = sum(my.group$count[which(my.group$snps >= 7)])
+}
+
+# Anqi wants the whole dataset in  table, so we'll make that here - this is per group
+
+my.all.results <- matrix(nrow = length(unique(dd.filtered$group)), ncol = max(dd.filtered$snps)+1, 0)
+rownames(my.all.results) <- unique(dd.filtered$group)
+colnames(my.all.results) <- seq(0,max(dd.filtered$snps), by=1)
+for (i in 1:length(rownames(my.all.results))) {
+    my.group <- dd.filtered[which(dd.filtered$group == rownames(my.all.results)[i]),]
+    for (j in 1:length(colnames(my.all.results))) {
+      my.all.results[i,j] <- sum(my.group$count[which(my.group$snps == colnames(my.all.results)[j])])    
+    }
+}
+
+my.pie.fn <- paste(working.dir,'/r_output_files/pie_chart_data.csv', sep="")
+
+write.csv(my.results, my.pie.fn)
+
+my.all.groups.fn <- paste(working.dir,'/r_output_files/groups_mutation_count_data.csv', sep="")
+
+write.csv(my.all.results, my.all.groups.fn)
+```
+
+Next we'll set up another function to plot our pie chart, as we don't want to type it out over and over again and use it to plot our pies
+
+```{r, message=FALSE, warning=FALSE}
+plot.pie <- function(x) {
+my.melt <- reshape2::melt(x)
+ggplot(my.melt, aes(x="", y=value, fill=variable))+
+  geom_bar(width = 1, stat = "identity")+
+  coord_polar("y", start=0) +
+  theme(axis.text.x=element_blank()) +
+  ggtitle(x$group)
+}
+
+for (i in 1:dim(my.results)[1]) {
+  f <- plot.pie(rev(my.results[i,]))
+  print(f)
+}
+```
+
+## PIE CHARTS PER MOUSE
+
+```{r, message=FALSE, warning=FALSE}
+
+## note, this calculates the proportion of reads in each group with n SNPs
+
+my.results <- data.frame('group' = unique(dd.filtered$sample), 'zero' = 0, 'one' = 0, 'two' = 0, 'three' = 0, 'four' = 0, 'five' = 0, 'six' = 0, 'seven.plus' = 0)
+
+for (i in 1:length(my.results$group)) {
+  my.group <- dd.filtered[which(dd.filtered$sample == my.results$group[i]),]
+  my.results$zero[i] = sum(my.group$count[which(my.group$snps == 0)])
+  my.results$one[i] = sum(my.group$count[which(my.group$snps == 1)])
+  my.results$two[i] = sum(my.group$count[which(my.group$snps == 2)])
+  my.results$three[i] = sum(my.group$count[which(my.group$snps == 3)])
+  my.results$four[i] = sum(my.group$count[which(my.group$snps == 4)])
+  my.results$five[i] = sum(my.group$count[which(my.group$snps == 5)])
+  my.results$six[i] = sum(my.group$count[which(my.group$snps == 6)])
+  my.results$seven.plus[i] = sum(my.group$count[which(my.group$snps >= 7)])
+  f <- plot.pie(rev(my.results[i,]))
+  print(f)
+}
+
+# Anqi wants the whole dataset in  table, so we'll make that here - this is per mouse
+
+my.mouse.results <- matrix(nrow = length(unique(dd.filtered$sample)), ncol = max(dd.filtered$snps)+1, 0)
+rownames(my.mouse.results) <- unique(dd.filtered$sample)
+colnames(my.mouse.results) <- seq(0,max(dd.filtered$snps), by=1)
+for (i in 1:length(rownames(my.mouse.results))) {
+    my.group <- dd.filtered[which(dd.filtered$sample == rownames(my.mouse.results)[i]),]
+    for (j in 1:length(colnames(my.mouse.results))) {
+      my.mouse.results[i,j] <- sum(my.group$count[which(my.group$snps == colnames(my.mouse.results)[j])])    
+    }
+}
+
+my.pie.per.mouse.fn <- paste(working.dir,'/r_output_files/per_mouse_pie_chart_data.csv', sep="")
+
+write.csv(my.results, my.pie.per.mouse.fn)
+
+my.all.per.mouse.fn <- paste(working.dir,'/r_output_files/per_mouse_mutation_count_data.csv', sep="")
+
+write.csv(my.mouse.results, my.all.per.mouse.fn)
+
+```
+
+
+## Tables of substitutions
+
+ We want to set up a function that will allow us to parse out the substitution tables from the data.  We'll make this as a function so we can run it easily multiple times (if we need to).  We can then use that function to produce our tables of substitutions for each sample.  Here, we're using the filtered data, but the function makes it easy to run if we wanted to do it again on pre-filtered data
+
+```{r, message=FALSE, warning=FALSE}
+get.conversions <- function(x) {
+  conversions <- strsplit(x$conversions,';')
+  conv.tables <- list()
+  for (i in 1:length(unique(x$sample))) {
+    result.table <- matrix(nrow=4, ncol=4, 0)
+    colnames(result.table) <- c('A', 'T', 'C', 'G')
+    rownames(result.table) <- c('A', 'T', 'C', 'G')
+    sample.conversions <- conversions[which(x$sample == unique(x$sample)[i])]
+    for (j in 1:length(sample.conversions)) {
+      for (k in 1:length(sample.conversions[[j]])) {
+        conv.val <- unlist(strsplit(sample.conversions[[j]][k],'='))
+        conv <- unlist(strsplit(conv.val[1],':'))
+        result.table[conv[1], conv[2]] <- result.table[conv[1], conv[2]] + as.numeric(conv.val[2])
+      }
+    }
+    conv.tables[[i]] <- result.table
+  }
+  names(conv.tables) <- unique(x$sample)
+  return(conv.tables)
+}
+
+conversion.tables <- get.conversions(dd.filtered)
+print(conversion.tables)
+```
+
+## Substitution tables per group
+
+When aggregating the counts per group, I will divide the total number of each substitution by the number of individuals per group, to give an average per group, as the groups may not have the same number of individuals
+
+```{r, message=FALSE, warning=FALSE}
+get.group.conversions <- function(x) {
+  conv.tables <- list()
+  for (i in 1:length(unique(x$group))) {
+    xx <- x[which(x$group == unique(x$group)[i]),]
+    conversions <- strsplit(xx$conversions,';')
+    result.table <- matrix(nrow=4, ncol=4, 0)
+    colnames(result.table) <- c('A', 'T', 'C', 'G')
+    rownames(result.table) <- c('A', 'T', 'C', 'G')
+    for (j in 1:length(conversions)) {
+      for (k in 1:length(conversions[[j]])) {
+        conv.val <- unlist(strsplit(conversions[[j]][k],'='))
+        conv <- unlist(strsplit(conv.val[1],':'))
+        result.table[conv[1], conv[2]] <- result.table[conv[1], conv[2]] + as.numeric(conv.val[2])
+      }  
+    }
+    result.table <- result.table / length(unique(xx$sample))
+    conv.tables[[i]] <- result.table
+  }
+  names(conv.tables) <- unique(x$group)
+  return(conv.tables)
+}
+
+conversion.tables <- get.group.conversions(dd.filtered)
+print(conversion.tables)
+```

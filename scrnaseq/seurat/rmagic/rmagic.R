@@ -1,0 +1,8 @@
+library(reticulate)
+use_condaenv("/camp/home/hungm/.conda/envs/seurat5")
+use_python("/camp/home/hungm/.conda/envs/seurat5/bin/python")
+setwd("/nemo/lab/caladod/working/Matthew/project/anqi/20230719_SC22272")
+library(Rmagic)
+data <- read.csv("anndata/rna_data.csv")
+data.magic <- magic(data)
+write.csv(data.magic, file = "data/rmagic_inputation.csv")

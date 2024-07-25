@@ -1,0 +1,38 @@
+.libPaths("/nemo/lab/caladod/working/Matthew/.conda/envs/slingshot/lib/R/library")
+# load R libraries
+library(tidyverse)
+library(Seurat)
+library(SeuratData)
+library(patchwork)
+library(cowplot)
+library(clustree)
+library(slingshot)
+library(tradeSeq)
+library(pheatmap)
+library(zoo)
+library(ComplexHeatmap)
+options(Seurat.object.assay.version = "v5")
+options(future.globals.maxSize = 1e12)
+setwd("/nemo/lab/caladod/working/Matthew/project/anqi/20230719_SC22272")
+
+load("data/14_slingshot/14_slingshot_objects.Rdata")
+
+set.seed(5)
+cells_keep <- meta.data %>% filter(!is.na(C05_pseudotime)) %>% rownames(.)
+counts <- as.matrix(counts.matrix[features, cells_keep])
+png("figures/14_velocity_trajectory_png/14.7_slingshot/C05_lineage6_knots.png", width = 1500*5, height = 500*5, res = 78*5)
+icMat <- evaluateK(counts = counts, pseudotime = pseudotime[cells_keep,6], cellWeights = cell.weights[cells_keep,6], k = 3:20, nGenes = 200, verbose = T, parallel = TRUE)
+dev.off()
+
+cells_keep <- meta.data %>% filter(!is.na(C08_pseudotime)) %>% rownames(.)
+counts <- as.matrix(counts.matrix[features, cells_keep])
+png("figures/14_velocity_trajectory_png/14.7_slingshot/C08_lineage3_knots.png", width = 1500*5, height = 500*5, res = 78*5)
+icMat2 <- evaluateK(counts = counts, pseudotime = pseudotime[cells_keep,3], cellWeights = cell.weights[cells_keep,3], k = 3:20, nGenes = 200, verbose = T, parallel = TRUE)
+dev.off()
+
+cells_keep <- meta.data %>% filter(!is.na(C07_pseudotime)) %>% rownames(.)
+counts <- as.matrix(counts.matrix[features, cells_keep])
+png("figures/14_velocity_trajectory_png/14.7_slingshot/C07_lineage1_knots.png", width = 1500*5, height = 500*5, res = 78*5)
+icMat3 <- evaluateK(counts = counts, pseudotime = pseudotime[cells_keep,1], cellWeights = cell.weights[cells_keep,1], k = 3:20, nGenes = 200, verbose = T, parallel = TRUE)
+dev.off()
+
